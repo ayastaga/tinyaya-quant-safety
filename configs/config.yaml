@@ -1,0 +1,67 @@
+# Central config (v2). Every script reads this.
+
+models:
+  global: CohereLabs/tiny-aya-global
+  earth:  CohereLabs/tiny-aya-earth
+  fire:   CohereLabs/tiny-aya-fire
+  water:  CohereLabs/tiny-aya-water
+
+precisions: [bf16, q8_0, q4_k_m, q4_0]
+stress_precisions: [q3_k_m, q2_k]      # Phase 2 methods-demo if shipped precisions are robust
+
+paths:
+  hf_cache:   ./models/hf
+  gguf_dir:   ./models/gguf
+  results:    ./results
+  data:       ./data
+
+datasets:
+  multijail: DAMO-NLP-SG/MultiJail            # 315 prompts x 10 languages
+  mdolly:    CohereLabs/aya_evaluation_suite   # config 'dolly_machine_translated'
+  flores:    openlanguagedata/flores_plus      # gated; fallback: Muennighoff/flores200
+  mgsm:      juletxara/mgsm                    # canonical MGSM: 11 langs, human-translated,
+                                               # test=250, field answer_number.
+                                               # VERIFY (Sec 2.1 item 1/2): if the paper's
+                                               # "GlobalMGSM" (35 langs) is on HF, swap it in;
+                                               # extra languages beyond canonical MGSM are
+                                               # machine-translated -> caveat in report.
+  xstest:    natolambert/xstest-v2-copy        # VERIFY fields (prompt, type/label) on first load
+
+multijail_langs: [en, zh, it, vi, ar, ko, th, bn, sw, jv]
+mgsm_langs:      [en, es, de, ru, zh, ja, th, sw, bn, te]   # fr dropped (not in eval_langs);
+                                                             # overlap w/ multijail: en,zh,th,sw,bn
+format_langs:    [en, zh, it, vi, ar, ko, th, bn, sw, jv]   # = multijail_langs, comparability
+eval_langs: [en, es, de, ru, ar, he, tr, hi, bn, ta, te, ur, th, vi, id, ja, ko, zh, sw, yo, ha, am, zu]
+
+generation:
+  max_new_tokens: 512
+  temperature: 0.0
+  context: 8192
+generation_cot:
+  max_new_tokens: 1024      # Eval D only; log truncation (token-budget confound, Sec 4.1 notes)
+
+judge:
+  model: command-a-03-2025
+  max_retries: 6
+  sleep_between: 1.0
+judge_tiers: {signal: 50, confirm: 150, final: 315}
+
+# Approximate CommonCrawl-derived web-presence shares (%), PLACEHOLDER estimates for the
+# Fig.15-style cross-axis analysis. Replace with the paper's exact bins/counts before the
+# final figure; keep the ranking, not these decimals, as the claim until then.
+web_presence:
+  en: 45.0
+  ru: 6.0
+  ja: 5.0
+  de: 5.6
+  zh: 4.8
+  es: 4.6
+  it: 2.6
+  vi: 1.0
+  ko: 0.76
+  ar: 0.66
+  th: 0.40
+  bn: 0.11
+  te: 0.02
+  sw: 0.005
+  jv: 0.003

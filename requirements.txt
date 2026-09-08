@@ -1,0 +1,18 @@
+transformers>=4.48
+torch
+accelerate
+datasets
+huggingface_hub
+cohere>=5.0
+fasttext-wheel
+sacrebleu>=2.4
+gguf>=0.10          # tensor-map inspection
+peft>=0.13
+bitsandbytes
+trl>=0.12
+jsonschema
+pandas
+matplotlib
+pyyaml
+tqdm
+# llama-cpp-python installed separately with CMAKE_ARGS="-DGGML_CUDA=on"
