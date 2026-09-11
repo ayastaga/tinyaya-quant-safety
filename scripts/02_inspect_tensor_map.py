@@ -22,6 +22,8 @@ from common import load_config, result_path
 def classify(name: str) -> str:
     if "token_embd" in name:
         return "token_embedding"
+    if any(k in name for k in ("attn_q", "attn_k", "attn_v", "attn_output")):
+        return "attention"
     if "output" in name and "norm" not in name:
         return "output_head"
     if any(k in name for k in ("attn_q", "attn_k", "attn_v", "attn_output")):
