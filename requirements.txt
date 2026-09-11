@@ -15,3 +15,4 @@ pandas
 matplotlib
 pyyaml
 tqdm
+protobuf>=5.29
