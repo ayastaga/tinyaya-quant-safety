@@ -136,6 +136,32 @@ def budget_for(cfg, eval_name):
             else cfg["generation"]["max_new_tokens"])
 
 
+# Tokens that end an assistant turn in the Cohere/Aya chat format. The shipped
+# generation_config.json is '_from_model_config' (auto-derived, eos_token_id=3)
+# and does NOT match the tokenizer, which uses <|END_OF_TURN_TOKEN|>. Without
+# this override HF never stops, burns the full budget on every prompt, and the
+# decoded response contains hallucinated extra turns.
+STOP_TOKEN_STRINGS = ["<|END_OF_TURN_TOKEN|>", "<|END_RESPONSE|>", "<EOS_TOKEN>"]
+
+
+def resolve_stop_ids(tok):
+    """Token ids that should terminate generation. Raises if none resolve."""
+    ids, vocab = [], tok.get_vocab()
+    for s in STOP_TOKEN_STRINGS:
+        i = vocab.get(s)
+        if i is None:
+            i = tok.convert_tokens_to_ids(s)
+        if i is not None and i != tok.unk_token_id:
+            ids.append(int(i))
+    if tok.eos_token_id is not None:
+        ids.append(int(tok.eos_token_id))
+    ids = sorted(set(ids))
+    if not ids:
+        raise RuntimeError(
+            "No stop tokens resolved; refusing to generate with an open-ended budget.")
+    return ids
+
+
 class HFBackend:
     def __init__(self, cfg, model_name):
         import torch
@@ -146,18 +172,33 @@ class HFBackend:
             path, torch_dtype=torch.bfloat16, device_map="auto")
         self.cfg = cfg
 
+        self.stop_ids = resolve_stop_ids(self.tok)
+        pad = self.tok.pad_token_id
+        gc = self.model.generation_config
+        gc.eos_token_id = self.stop_ids
+        gc.pad_token_id = int(pad) if pad is not None else self.stop_ids[0]
+        if self.tok.bos_token_id is not None:
+            gc.bos_token_id = int(self.tok.bos_token_id)
+        print(f"[HFBackend] stop ids: "
+              f"{[(i, self.tok.convert_ids_to_tokens(i)) for i in self.stop_ids]}, "
+              f"pad={gc.pad_token_id}")
+
     def generate(self, prompt, max_new_tokens=None):
         import torch
         budget = max_new_tokens or self.cfg["generation"]["max_new_tokens"]
         msgs = [{"role": "user", "content": prompt}]
-        ids = self.tok.apply_chat_template(
-            msgs, add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+        enc = self.tok.apply_chat_template(
+            msgs, add_generation_prompt=True, return_tensors="pt",
+            return_dict=True).to(self.model.device)
         with torch.no_grad():
-            out = self.model.generate(ids, max_new_tokens=budget, do_sample=False,
-                                      pad_token_id=self.tok.eos_token_id)
-        new = out[0][ids.shape[1]:]
+            out = self.model.generate(**enc, max_new_tokens=budget, do_sample=False,
+                                      eos_token_id=self.stop_ids,
+                                      pad_token_id=self.model.generation_config.pad_token_id)
+        new = out[0][enc["input_ids"].shape[1]:]
         text = self.tok.decode(new, skip_special_tokens=True)
-        return text, bool(len(new) >= budget)   # (response, truncated)
+        # Truncated == the model never emitted a stop token, i.e. it hit the budget.
+        stopped = any(t in self.stop_ids for t in new.tolist())
+        return text, not stopped
 
 
 class GGUFBackend:
@@ -172,9 +213,15 @@ class GGUFBackend:
         budget = max_new_tokens or self.cfg["generation"]["max_new_tokens"]
         out = self.llm.create_chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=budget, temperature=0.0)
+            max_tokens=budget, temperature=0.0,
+            # Belt-and-braces: if the GGUF inherited the wrong eos id at
+            # conversion time, these string stops still cut the turn.
+            stop=["<|END_OF_TURN_TOKEN|>", "<|START_OF_TURN_TOKEN|>"])
         choice = out["choices"][0]
-        return choice["message"]["content"], choice.get("finish_reason") == "length"
+        text = choice["message"]["content"] or ""
+        for s in ("<|END_RESPONSE|>", "<|END_OF_TURN_TOKEN|>"):
+            text = text.replace(s, "")
+        return text, choice.get("finish_reason") == "length"
 
 
 def main():
