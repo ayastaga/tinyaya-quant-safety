@@ -18,6 +18,30 @@ def load_config():
     return cfg
 
 
+LLAMA_CPP_PIN_FILE = ROOT / "configs" / "llama_cpp_commit.txt"
+
+
+def llama_cpp_pin() -> str:
+    """The llama.cpp commit the GGUFs were built with, for provenance in logs.
+
+    Read-only: 01_quantize.sh records the pin, nothing else ever rewrites it.
+    Order: recorded file -> the local clone's HEAD -> LLAMA_CPP_TAG -> unknown.
+    """
+    if LLAMA_CPP_PIN_FILE.exists():
+        txt = LLAMA_CPP_PIN_FILE.read_text().strip()
+        if txt:
+            return txt
+    clone = ROOT / "llama.cpp"
+    if (clone / ".git").exists():
+        try:
+            import subprocess
+            return subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
+            pass
+    return os.environ.get("LLAMA_CPP_TAG", "UNPINNED (01_quantize.sh not run here)")
+
+
 def content_hash(*parts) -> str:
     h = hashlib.sha256()
     for p in parts:

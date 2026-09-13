@@ -36,4 +36,17 @@ for MODEL in "$@"; do
   done
 done
 echo "Done. Record llama.cpp commit for the paper:"
-git -C "$ROOT/llama.cpp" rev-parse HEAD
+HEAD_COMMIT="$(git -C "$ROOT/llama.cpp" rev-parse HEAD)"
+echo "$HEAD_COMMIT"
+
+# Record the pin so 02b/03 can print it with every diagnostic. An existing pin is
+# never overwritten: the GGUFs on disk were built with it, and silently moving it
+# would misattribute the provenance of the audited artifacts. Delete the file
+# deliberately if you really are re-quantizing with a different llama.cpp.
+PIN_FILE="$ROOT/configs/llama_cpp_commit.txt"
+if [ -f "$PIN_FILE" ] && [ "$(cat "$PIN_FILE")" != "$HEAD_COMMIT" ]; then
+  echo "WARNING: recorded pin $(cat "$PIN_FILE") != working clone $HEAD_COMMIT;" \
+       "keeping the recorded pin. Delete $PIN_FILE to re-record."
+else
+  echo "$HEAD_COMMIT" > "$PIN_FILE"
+fi

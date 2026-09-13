@@ -19,13 +19,15 @@ Usage:
   python 03_generate.py --model global --precision q4_0 --eval globalmgsm --max-per-lang 100
 """
 import argparse
+import inspect
 import json
+import sys
 from pathlib import Path
 
 from datasets import load_dataset
 from tqdm import tqdm
 
-from common import JsonlStore, load_config, result_path
+from common import JsonlStore, llama_cpp_pin, load_config, result_path
 
 TRANSLATION_TEMPLATE = (
     "Translate the following text into {target_language}. "
@@ -143,6 +145,42 @@ def budget_for(cfg, eval_name):
 # decoded response contains hallucinated extra turns.
 STOP_TOKEN_STRINGS = ["<|END_OF_TURN_TOKEN|>", "<|END_RESPONSE|>", "<EOS_TOKEN>"]
 
+# The GGUF path must stop on exactly the same ids as HF. The GGUF metadata marks
+# only <|END_OF_TURN_TOKEN|> (6) as EOG -- <EOS_TOKEN> (3) and <|END_RESPONSE|>
+# (261001) are not marked -- so llama.cpp's own EOG check is not enough and
+# string `stop=` sequences never fire on the special-token spellings. We resolve
+# the ids from the original HF tokenizer and compare raw generated ids instead.
+# We do NOT edit the GGUF metadata: the audited artifact stays byte-identical to
+# what a user downloads.
+GGUF_STOP_TOKEN_STRINGS = ["<EOS_TOKEN>", "<|END_OF_TURN_TOKEN|>", "<|END_RESPONSE|>"]
+
+
+def _token_id(tok, s):
+    """Vocab id for a special-token spelling, or None if it does not resolve."""
+    i = tok.get_vocab().get(s)
+    if i is None:
+        i = tok.convert_tokens_to_ids(s)
+    if i is None or i == tok.unk_token_id:
+        return None
+    return int(i)
+
+
+def gen_result(text, *, stop_token_id=None, stop_token=None, stop_reason="max_tokens",
+               prompt_tokenization_match=None, n_generated_tokens=None):
+    """One generation plus the diagnostics that say whether to trust it."""
+    return {
+        "response": text,
+        # truncated == the model ran out of budget without emitting a stop
+        # token. Kept for 04b/07, which already key on it. Errors get
+        # stop_reason "error" and are not counted as truncations.
+        "truncated": stop_reason == "max_tokens",
+        "stop_token_id": stop_token_id,
+        "stop_token": stop_token,
+        "stop_reason": stop_reason,
+        "prompt_tokenization_match": prompt_tokenization_match,
+        "n_generated_tokens": n_generated_tokens,
+    }
+
 
 def resolve_stop_ids(tok):
     """Token ids that should terminate generation. Raises if none resolve."""
@@ -183,6 +221,15 @@ class HFBackend:
               f"{[(i, self.tok.convert_ids_to_tokens(i)) for i in self.stop_ids]}, "
               f"pad={gc.pad_token_id}")
 
+    def prompt_token_ids(self, prompt):
+        """(rendered prompt string, prompt token ids) -- the parity reference."""
+        msgs = [{"role": "user", "content": prompt}]
+        rendered = self.tok.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True)
+        ids = self.tok.apply_chat_template(
+            msgs, tokenize=True, add_generation_prompt=True)
+        return rendered, [int(i) for i in ids]
+
     def generate(self, prompt, max_new_tokens=None):
         import torch
         budget = max_new_tokens or self.cfg["generation"]["max_new_tokens"]
@@ -194,34 +241,116 @@ class HFBackend:
             out = self.model.generate(**enc, max_new_tokens=budget, do_sample=False,
                                       eos_token_id=self.stop_ids,
                                       pad_token_id=self.model.generation_config.pad_token_id)
-        new = out[0][enc["input_ids"].shape[1]:]
-        text = self.tok.decode(new, skip_special_tokens=True)
-        # Truncated == the model never emitted a stop token, i.e. it hit the budget.
-        stopped = any(t in self.stop_ids for t in new.tolist())
-        return text, not stopped
+        new = out[0][enc["input_ids"].shape[1]:].tolist()
+        stop_id = next((t for t in new if t in self.stop_ids), None)
+        # Decode only the response, excluding the stopping token.
+        body = new[:new.index(stop_id)] if stop_id is not None else new
+        text = self.tok.decode(body, skip_special_tokens=True)
+        return gen_result(
+            text,
+            stop_token_id=stop_id,
+            stop_token=(self.tok.convert_ids_to_tokens(stop_id)
+                        if stop_id is not None else None),
+            stop_reason="eog" if stop_id is not None else "max_tokens",
+            prompt_tokenization_match=True,  # HF is the reference tokenization
+            n_generated_tokens=len(body))
 
 
 class GGUFBackend:
+    """llama.cpp on a GGUF, driven at the token level.
+
+    create_chat_completion is not used: it re-renders the prompt with the chat
+    template baked into the GGUF and can only stop on string sequences, which
+    never match the special-token spellings and leave tokens 3 / 261001 (not
+    marked EOG in the metadata) unhandled -- the model then runs to max_tokens
+    and repeats itself. Instead we render with the original HF tokenizer,
+    tokenize that exact string, and stop on raw generated ids.
+    """
+
     def __init__(self, cfg, model_name, precision):
         from llama_cpp import Llama
+        from transformers import AutoTokenizer
+        # Read-only: the HF checkpoint and the GGUF are both left untouched.
+        self.tok = AutoTokenizer.from_pretrained(
+            f'{cfg["paths"]["hf_cache"]}/{model_name}')
         path = f'{cfg["paths"]["gguf_dir"]}/{model_name}-{precision}.gguf'
         self.llm = Llama(model_path=path, n_ctx=cfg["generation"]["context"],
                          n_gpu_layers=-1, verbose=False)
         self.cfg = cfg
 
+        self.stop_ids = {}
+        missing = []
+        for s in GGUF_STOP_TOKEN_STRINGS:
+            i = _token_id(self.tok, s)
+            if i is None:
+                missing.append(s)
+            else:
+                self.stop_ids[i] = s
+        if missing:
+            raise RuntimeError(
+                f"Stop tokens {missing} do not resolve in the HF tokenizer at "
+                f'{cfg["paths"]["hf_cache"]}/{model_name}; refusing to generate '
+                "with an open-ended budget.")
+        self._warned_tokenization = False
+        print(f"[GGUFBackend] {model_name}-{precision} | llama.cpp pin: "
+              f"{llama_cpp_pin()} | stop ids: {sorted(self.stop_ids.items())}")
+
+    def prompt_token_ids(self, prompt):
+        """(rendered prompt string, llama.cpp prompt token ids)."""
+        rendered = self.tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True)
+        ids = self.llm.tokenize(rendered.encode("utf-8"), add_bos=False, special=True)
+        return rendered, [int(i) for i in ids]
+
+    def _greedy_kwargs(self):
+        """Greedy sampling args that this llama-cpp-python version accepts."""
+        want = {"top_k": 1, "top_p": 1.0, "min_p": 0.0, "typical_p": 1.0,
+                "temp": 0.0, "repeat_penalty": 1.0, "reset": True}
+        params = inspect.signature(self.llm.generate).parameters
+        return {k: v for k, v in want.items() if k in params}
+
+    def _detokenize(self, tokens):
+        if not tokens:
+            return ""
+        try:
+            raw = self.llm.detokenize(tokens, special=False)
+        except TypeError:  # older llama-cpp-python: no `special` kwarg
+            raw = self.llm.detokenize(tokens)
+        return raw.decode("utf-8", errors="replace")
+
     def generate(self, prompt, max_new_tokens=None):
         budget = max_new_tokens or self.cfg["generation"]["max_new_tokens"]
-        out = self.llm.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=budget, temperature=0.0,
-            # Belt-and-braces: if the GGUF inherited the wrong eos id at
-            # conversion time, these string stops still cut the turn.
-            stop=["<|END_OF_TURN_TOKEN|>", "<|START_OF_TURN_TOKEN|>"])
-        choice = out["choices"][0]
-        text = choice["message"]["content"] or ""
-        for s in ("<|END_RESPONSE|>", "<|END_OF_TURN_TOKEN|>"):
-            text = text.replace(s, "")
-        return text, choice.get("finish_reason") == "length"
+        rendered, tokens = self.prompt_token_ids(prompt)
+        hf_ids = self.tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True, add_generation_prompt=True)
+        match = [int(i) for i in hf_ids] == tokens
+        if not match and not self._warned_tokenization:
+            self._warned_tokenization = True
+            print("[GGUFBackend] WARNING: llama.cpp prompt tokenization differs "
+                  "from the HF tokenizer; BF16/GGUF deltas are not comparable. "
+                  "See 02b_template_check.py.", file=sys.stderr)
+
+        # Leave room for the response inside the context window.
+        budget = max(1, min(budget, self.llm.n_ctx() - len(tokens) - 1))
+
+        out, stop_id = [], None
+        for tid in self.llm.generate(tokens, **self._greedy_kwargs()):
+            tid = int(tid)
+            if tid in self.stop_ids:
+                stop_id = tid
+                break
+            out.append(tid)
+            if len(out) >= budget:  # hard fallback, never the expected exit
+                break
+        return gen_result(
+            self._detokenize(out),  # response tokens only, stop token excluded
+            stop_token_id=stop_id,
+            stop_token=self.stop_ids.get(stop_id),
+            stop_reason="eog" if stop_id is not None else "max_tokens",
+            prompt_tokenization_match=match,
+            n_generated_tokens=len(out))
 
 
 def main():
@@ -243,17 +372,43 @@ def main():
     if not todo:
         return
 
+    print(f"llama.cpp pin: {llama_cpp_pin()}")
     backend = (HFBackend(cfg, args.model) if args.precision == "bf16"
                else GGUFBackend(cfg, args.model, args.precision))
     budget = budget_for(cfg, args.eval)
 
+    n_max_tokens, n_mismatch, n_error = 0, 0, 0
     for it in tqdm(todo):
         try:
-            text, truncated = backend.generate(it["prompt"], max_new_tokens=budget)
+            res = backend.generate(it["prompt"], max_new_tokens=budget)
         except Exception as e:  # noqa: BLE001
-            text, truncated, it["error"] = "", False, str(e)
-        store.add(it["id"], {**it, "response": text, "truncated": truncated,
+            res = gen_result("", stop_reason="error")
+            it["error"] = str(e)
+            n_error += 1
+        # A max_tokens exit is a diagnostic warning, not a clean generation: the
+        # model never emitted a stop token, so the text is usually truncated or
+        # looping. Downstream scorers must be able to see and exclude these.
+        if res["stop_reason"] == "max_tokens":
+            n_max_tokens += 1
+        if res["prompt_tokenization_match"] is False:
+            n_mismatch += 1
+        store.add(it["id"], {**it, **res,
                              "model": args.model, "precision": args.precision})
+
+    done = len(todo)
+    print(f"\n{done} generated | clean stop: {done - n_max_tokens - n_error} | "
+          f"max_tokens: {n_max_tokens} | errors: {n_error}", flush=True)
+    if n_max_tokens:
+        print(f"WARNING: {n_max_tokens}/{done} ({100 * n_max_tokens / done:.1f}%) hit "
+              "the token budget without a stop token. These are flagged "
+              '(stop_reason="max_tokens", truncated=true) and must NOT be read as '
+              "successful generations -- expect truncation and repetition. If the "
+              "rate is high, re-run scripts/02b_template_check.py before scoring.",
+              file=sys.stderr)
+    if n_mismatch:
+        print(f"WARNING: {n_mismatch}/{done} prompts tokenized differently in "
+              "llama.cpp than in the HF tokenizer; the BF16 comparison is invalid.",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

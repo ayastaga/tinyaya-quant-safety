@@ -37,6 +37,7 @@ Fire/Water.
 00_download_models.py      # HF download (needs HF token; accept license on model pages)
 01_quantize.sh             # HF -> GGUF f16 -> Q8_0 / Q4_K_M / Q4_0 (CPU ok)
 02_inspect_tensor_map.py   # per-tensor quant map: which layers really got 4-bit?  (NO GPU)
+02b_template_check.py      # BLOCKING backend parity gate (see below); exit 1 = stop
 03_generate.py             # generations for any (model, precision, eval) cell
 04_judge_multijail.py      # Command A judge -> safe response rate per language
 05_language_confusion.py   # fastText line-level pass rate on mDolly generations
@@ -45,6 +46,48 @@ Fire/Water.
 08_qlora_repair.py         # QLoRA safety-healing pass (only if audit finds damage)
 09_reexport_and_reaudit.md # merge adapter -> re-GGUF -> rerun 03-07 on repaired model
 ```
+
+## Backend parity gate
+
+**Evaluation does not begin until BF16 and Q8_0 both pass
+`scripts/02b_template_check.py`.** Q8_0 is near-lossless, so under greedy
+decoding the two backends must produce near-identical text. If they do not, the
+harness — not quantization — is producing the delta, and every number in the
+project is garbage.
+
+```bash
+python scripts/02b_template_check.py --model global   # exit 0 required before 03_generate.py
+```
+
+The gate runs seven probes (English, Swahili, Chinese) and fails on any of:
+
+- **prompt token ids differ** between transformers and llama.cpp. Both backends
+  render the turn with the HF tokenizer's `apply_chat_template(...,
+  tokenize=False, add_generation_prompt=True)`; llama.cpp then tokenizes that
+  exact string with `add_bos=False, special=True`. The ids must match exactly —
+  otherwise the two precisions are not being fed the same prompt.
+- **no recognized stop token.** Tiny Aya ends a turn with `<EOS_TOKEN>` (3),
+  `<|END_OF_TURN_TOKEN|>` (6) or `<|END_RESPONSE|>` (261001). The GGUF metadata
+  marks only token 6 as EOG, and `create_chat_completion`'s string `stop=`
+  sequences never match the special-token spellings, so the GGUF backend drives
+  `llama_cpp.Llama.generate` directly and compares raw generated ids against all
+  three. `max_new_tokens` remains a hard fallback only.
+- **obvious repetition** in either response — the signature of a turn that ran
+  past its missed stop token.
+- **mean similarity below `PASS_RATIO`** (0.70).
+
+Every generation records `stop_token_id`, `stop_token`, `stop_reason`
+(`"eog"` / `"max_tokens"`) and `prompt_tokenization_match`. A `max_tokens` exit
+is a **diagnostic warning, not a successful generation**: `03_generate.py`
+prints the rate at the end of a run and those records stay flagged
+(`truncated: true`) for the scorers.
+
+Constraints this gate operates under: the downloaded HF config files are never
+edited, the GGUF metadata is never mutated, and the quantized weights are never
+touched — the artifact under audit stays byte-identical to the one a user
+downloads. The llama.cpp commit used to build the GGUFs is pinned in
+`configs/llama_cpp_commit.txt` (written once by `01_quantize.sh`) and printed in
+the diagnostic output of both `02b_template_check.py` and `03_generate.py`.
 
 ## Colab Pro setup
 

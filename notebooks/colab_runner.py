@@ -20,6 +20,12 @@ os.environ["CO_API_KEY"] = userdata.get("CO_API_KEY")
 # !python scripts/02_inspect_tensor_map.py models/gguf/global-*.gguf
 # -> READ THE TENSOR MAP OUTPUT NOW. It shapes the whole mechanism story.
 
+# %% Phase 0 BLOCKING GATE — backend parity (A100/L4: loads BF16 + Q8_0)
+# !python scripts/02b_template_check.py --model global
+# Exit code MUST be 0 before any generation below: it proves BF16 and Q8_0 see
+# identical prompt token ids and both stop on a real stop token. See README
+# "Backend parity gate". Non-zero => fix the harness, every delta is garbage.
+
 # %% Day 1-2 — first signal: Global, MultiJail, 50/lang, all precisions
 # for prec in ["q8_0", "q4_k_m", "q4_0"]:
 #     !python scripts/03_generate.py --model global --precision {prec} --eval multijail --max-per-lang 50
@@ -45,9 +51,6 @@ os.environ["CO_API_KEY"] = userdata.get("CO_API_KEY")
 # from google.colab import drive
 # drive.mount('/content/drive')
 # !rsync -av results/ /content/drive/MyDrive/tinyaya-audit-results/
-
-# %% v2 — Phase 0 blocking gate (A100/L4: loads BF16 + Q8_0)
-# !python scripts/02b_template_check.py --model global
 
 # %% v2 — Phase 0.5 viability gates (BF16 only, tiny scale)
 # !python scripts/03_generate.py --model global --precision bf16 --eval globalmgsm --max-per-lang 20
