@@ -34,7 +34,7 @@ format_langs:    [en, zh, it, vi, ar, ko, th, bn, sw, jv]   # = multijail_langs,
 eval_langs: [en, es, de, ru, ar, he, tr, hi, bn, ta, te, ur, th, vi, id, ja, ko, zh, sw, yo, ha, am, zu]
 
 generation:
-  max_new_tokens: 512
+  max_new_tokens: 1024
   temperature: 0.0
   context: 8192
 generation_cot:
