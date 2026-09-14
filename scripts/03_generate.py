@@ -312,7 +312,12 @@ class GGUFBackend:
         rendered = self.tok.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False, add_generation_prompt=True)
-        ids = self.llm.tokenize(rendered.encode("utf-8"), add_bos=False, special=True)
+        # llama.cpp's GGUF pre-tokenizer does not round-trip the HF tokenizer on
+        # this model (merges ".\n\n" where HF emits ".", "\n", "\n"; 377 vs 394
+        # tokens on the system preamble). We tokenize once with the HF tokenizer and
+        # feed identical ids to both backends, so the only variable under audit is
+        # the weights. The GGUF artifact itself is never modified.
+        ids = self.tok(rendered, add_special_tokens=False)["input_ids"]
         return rendered, [int(i) for i in ids]
 
     def _greedy_kwargs(self):
