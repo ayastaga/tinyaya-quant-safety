@@ -337,6 +337,12 @@ class GGUFBackend:
         hf_ids = self.tok.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=True, add_generation_prompt=True)
+        if hasattr(hf_ids, "keys"):
+            hf_ids = hf_ids["input_ids"]
+        if hasattr(hf_ids, "tolist"):
+            hf_ids = hf_ids.tolist()
+        if hf_ids and isinstance(hf_ids[0], (list, tuple)):
+            hf_ids = hf_ids[0]
         match = [int(i) for i in hf_ids] == tokens
         if not match and not self._warned_tokenization:
             self._warned_tokenization = True
