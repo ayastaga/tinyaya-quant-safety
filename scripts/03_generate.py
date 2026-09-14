@@ -222,13 +222,25 @@ class HFBackend:
               f"pad={gc.pad_token_id}")
 
     def prompt_token_ids(self, prompt):
-        """(rendered prompt string, prompt token ids) -- the parity reference."""
-        msgs = [{"role": "user", "content": prompt}]
-        rendered = self.tok.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=True)
-        ids = self.tok.apply_chat_template(
-            msgs, tokenize=True, add_generation_prompt=True)
-        return rendered, [int(i) for i in ids]
+      """(rendered prompt string, prompt token ids) -- the parity reference."""
+      msgs = [{"role": "user", "content": prompt}]
+      rendered = self.tok.apply_chat_template(
+          msgs, tokenize=False, add_generation_prompt=True)
+      ids = self.tok.apply_chat_template(
+          msgs, tokenize=True, add_generation_prompt=True)
+  
+      # Transformers may return a list, tensor, or BatchEncoding.
+      if hasattr(ids, "keys"):
+          ids = ids["input_ids"]
+  
+      if hasattr(ids, "tolist"):
+          ids = ids.tolist()
+  
+      if ids and isinstance(ids[0], (list, tuple)):
+          ids = ids[0]
+  
+      return rendered, [int(i) for i in ids]
+
 
     def generate(self, prompt, max_new_tokens=None):
         import torch
