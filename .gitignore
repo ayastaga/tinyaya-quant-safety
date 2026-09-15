@@ -1,0 +1,7 @@
+models/
+results/
+llama.cpp/
+__pycache__/
+*.gguf
+*.jsonl
+*.whl

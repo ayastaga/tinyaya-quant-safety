@@ -29,6 +29,21 @@ from tqdm import tqdm
 
 from common import JsonlStore, llama_cpp_pin, load_config, result_path
 
+
+# aya_evaluation_suite uses ISO-639-3 + a script column; our configs and
+# fastText lid.176 use 2-letter codes. Map, and pin one script per language
+# so multi-script entries (e.g. zho Hans/Hant) don't mix.
+MDOLLY_LANGS = {
+    "eng": ("en", "Latn"), "spa": ("es", "Latn"), "deu": ("de", "Latn"),
+    "rus": ("ru", "Cyrl"), "arb": ("ar", "Arab"), "heb": ("he", "Hebr"),
+    "tur": ("tr", "Latn"), "hin": ("hi", "Deva"), "ben": ("bn", "Beng"),
+    "tam": ("ta", "Taml"), "tel": ("te", "Telu"), "urd": ("ur", "Arab"),
+    "tha": ("th", "Thai"), "vie": ("vi", "Latn"), "ind": ("id", "Latn"),
+    "jpn": ("ja", "Jpan"), "kor": ("ko", "Hang"), "zho": ("zh", "Hans"),
+    "swh": ("sw", "Latn"), "yor": ("yo", "Latn"), "hau": ("ha", "Latn"),
+    "amh": ("am", "Ethi"), "zul": ("zu", "Latn"),
+}
+
 TRANSLATION_TEMPLATE = (
     "Translate the following text into {target_language}. "
     "Provide only the translation.\n\nText: {text}\n\nTranslation:"
@@ -81,8 +96,11 @@ def load_prompts(cfg, eval_name, max_per_lang):
     elif eval_name == "mdolly":
         ds = load_dataset(cfg["datasets"]["mdolly"], "dolly_machine_translated", split="test")
         for i, row in enumerate(ds):
-            lang = row.get("language", row.get("lang", "unknown"))
-            if lang not in cfg["eval_langs"]:
+            entry = MDOLLY_LANGS.get(row["language"])
+            if entry is None:
+                continue
+            lang, script = entry
+            if lang not in cfg["eval_langs"] or row.get("script") != script:
                 continue
             items.append({"id": f"dolly-{i}-{lang}", "lang": lang, "prompt": row["inputs"]})
     elif eval_name == "flores":
@@ -222,25 +240,19 @@ class HFBackend:
               f"pad={gc.pad_token_id}")
 
     def prompt_token_ids(self, prompt):
-      """(rendered prompt string, prompt token ids) -- the parity reference."""
-      msgs = [{"role": "user", "content": prompt}]
-      rendered = self.tok.apply_chat_template(
-          msgs, tokenize=False, add_generation_prompt=True)
-      ids = self.tok.apply_chat_template(
-          msgs, tokenize=True, add_generation_prompt=True)
-  
-      # Transformers may return a list, tensor, or BatchEncoding.
-      if hasattr(ids, "keys"):
-          ids = ids["input_ids"]
-  
-      if hasattr(ids, "tolist"):
-          ids = ids.tolist()
-  
-      if ids and isinstance(ids[0], (list, tuple)):
-          ids = ids[0]
-  
-      return rendered, [int(i) for i in ids]
-
+        """(rendered prompt string, prompt token ids) -- the parity reference."""
+        msgs = [{"role": "user", "content": prompt}]
+        rendered = self.tok.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True)
+        ids = self.tok.apply_chat_template(
+            msgs, tokenize=True, add_generation_prompt=True)
+        if hasattr(ids, "keys"):
+            ids = ids["input_ids"]
+        if hasattr(ids, "tolist"):
+            ids = ids.tolist()
+        if ids and isinstance(ids[0], (list, tuple)):
+            ids = ids[0]
+        return rendered, [int(i) for i in ids]
 
     def generate(self, prompt, max_new_tokens=None):
         import torch
@@ -342,6 +354,7 @@ class GGUFBackend:
         hf_ids = self.tok.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=True, add_generation_prompt=True)
+        # transformers 5.x returns a BatchEncoding here, not a plain list.
         if hasattr(hf_ids, "keys"):
             hf_ids = hf_ids["input_ids"]
         if hasattr(hf_ids, "tolist"):

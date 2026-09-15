@@ -1,0 +1,13 @@
+{
+  "saved_at_utc": "2026-09-13T19:34:36.840744+00:00",
+  "project_git_commit": "0d8bdbc5f6e9d956b57e72ecb6c3a3fd55489ec6",
+  "llama_cpp_source_commit": "5f436dddb440a288ee5611d7d1eca564a6aca9f4",
+  "transformers_version": "4.57.6",
+  "llama_cpp_python_version": "0.3.35",
+  "generation_limit": 1024,
+  "stop_token_ids": [
+    3,
+    6,
+    261001
+  ]
+}
