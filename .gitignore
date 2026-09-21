@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+# data root lives outside the repo (TINYAYA_ROOT); never commit weights or GGUFs
+*.gguf
+*.safetensors

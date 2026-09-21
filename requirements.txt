@@ -1,0 +1,10 @@
+# Runtime dependencies for the package. llama-cpp-python is installed separately
+# with a CUDA wheel (see the notebook, Part 0) and pinned to 0.3.35.
+tqdm
+pandas
+matplotlib
+jinja2
+datasets
+huggingface_hub
+cohere
+protobuf>=5.29,<6

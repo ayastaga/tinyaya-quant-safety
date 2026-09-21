@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinyaya-eval"
+version = "1.0.0"
+description = "Does 4-bit GGUF quantization erode Tiny Aya's multilingual safety floor? Paired MultiJail benchmark on the llama.cpp path."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "tqdm", "pandas", "matplotlib", "jinja2", "datasets", "huggingface_hub", "cohere",
+]
+
+[tool.setuptools.packages.find]
+include = ["tinyaya_eval*"]
