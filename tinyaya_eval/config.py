@@ -48,6 +48,18 @@ PAPER_TABLE26_INVALID = MODELS[MODEL_NAME]["table26_invalid"]
 REFERENCE  = "f16"                         # unquantized reference: same backend, tokenizer, template
 QUANTS     = ["q8_0", "q4_k_m", "q4_0"]   # the three formats the paper ships (§6)
 PRECISIONS = [REFERENCE] + QUANTS
+# ── calibrated quants (exploratory; inert unless TINYAYA_CALIB=1) ───────────
+# llama.cpp q4_0/q4_k_m are round-to-nearest with no calibration data. The one
+# calibration knob is the importance matrix (llama-imatrix + llama-quantize
+# --imatrix), which reweights rounding error by per-channel activation
+# magnitude. precision name -> (llama-quantize type, corpus relative to ROOT).
+CALIB_QUANTS = {
+    "q4_0_im_lowres": ("Q4_0", "calib/lowres.txt"),
+    "q4_0_im_en":     ("Q4_0", "calib/en.txt"),
+    "q4_0_im_uni":    ("Q4_0", "calib/uniform10.txt"),
+}
+if os.environ.get("TINYAYA_CALIB") == "1":
+    PRECISIONS = PRECISIONS + list(CALIB_QUANTS)
 
 # ── pinned toolchain ────────────────────────────────────────────────────────
 LLAMA_CPP_PIN    = "5f436dddb440a288ee5611d7d1eca564a6aca9f4"
