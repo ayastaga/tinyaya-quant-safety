@@ -18,7 +18,8 @@ LLAMA_DIR = Path(os.environ.get("LLAMA_CPP_DIR", "/content/llama.cpp"))
 HF_DIR    = Path(config.ROOT) / "models" / "hf" / config.MODEL_NAME
 GGUF_DIR  = Path(config.ROOT) / "models" / "gguf"
 LOG_DIR   = Path(config.ROOT) / "logs"
-QTYPE     = {"q8_0": "Q8_0", "q4_k_m": "Q4_K_M", "q4_0": "Q4_0"}
+QTYPE = {"q8_0": "Q8_0", "q4_k_m": "Q4_K_M", "q4_0": "Q4_0",
+         **{k: v[0] for k, v in getattr(config, "CALIB_QUANTS", {}).items()}}
 
 
 def gguf_path(precision):
