@@ -105,8 +105,29 @@ def bpe_closure(keep, tokens, merges):
     return keep
 
 
+_BYTE_DECODER = None
+
+
+def _piece_text(t):
+    """Byte-level BPE piece -> the text it stands for (GPT-2 byte-to-unicode inverse)."""
+    global _BYTE_DECODER
+    if _BYTE_DECODER is None:
+        bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+        cs, n = bs[:], 0
+        for b in range(256):
+            if b not in bs:
+                bs.append(b); cs.append(256 + n); n += 1
+        _BYTE_DECODER = {chr(c): b for b, c in zip(bs, cs)}
+    return bytes(_BYTE_DECODER.get(ch, 63) for ch in t).decode("utf-8", "ignore")
+
+
+def _script(ch):
+    import unicodedata
+    return next((w for w in unicodedata.name(ch, "OTHER").split() if w.isupper()), "OTHER")
+
+
 # ── select ──────────────────────────────────────────────────────────────────
-def select(src, corpus_globs, out, min_count=1):
+def select(src, corpus_globs, out, min_count=1, keep_no_letters=False, keep_scripts=()):
     reader = _reader(src)
     kv = _kv(reader)
     tokens, ttype, merges = kv[TOKENS][0], kv[TTYPE][0], kv[MERGES][0]
@@ -119,10 +140,27 @@ def select(src, corpus_globs, out, min_count=1):
     # byte-level BPE base alphabet: every single-character token (one per byte value). Some
     # converters type these NORMAL, so keep them by shape, not by type -- they are the fallback path.
     base = {i for i, t in enumerate(tokens) if len(t) == 1}
-    keep = bpe_closure(used | special | base, tokens, merges)
+    # v2 rules (fixed a priori from the v1 failure mechanism, not fitted to test outputs):
+    #   keep_no_letters: every token with no letters -- punctuation/whitespace/digit/format pieces
+    #     such as '।\n\n' or ')**:'. The GPT-4o pre-tokenizer glues punctuation to newlines, so chat
+    #     formatting lives in tokens that reference text rarely produces. v1 dropped them and the model,
+    #     forced into non-canonical sequences, looped.
+    #   keep_scripts: every token whose letters are all in these Unicode scripts (the region's own
+    #     languages are then protected wholesale instead of by corpus coverage).
+    extra = set()
+    if keep_no_letters or keep_scripts:
+        import unicodedata
+        want = {s.upper() for s in keep_scripts}
+        for i, t in enumerate(tokens):
+            txt = _piece_text(t)
+            sc = {_script(ch) for ch in txt if ch.isalpha() or unicodedata.category(ch).startswith("M")}
+            if (keep_no_letters and not sc) or (want and sc and sc <= want):
+                extra.add(i)
+    keep = bpe_closure(used | special | base | extra, tokens, merges)
     keep = sorted(keep)
     stats = {"src": str(src), "corpus_files": files, "corpus_chars": n_chr, "corpus_tokens": n_tok,
              "vocab": len(tokens), "used_in_corpus": len(used), "special": len(special), "base_alphabet": len(base),
+             "rule_extra": len(extra), "keep_no_letters": keep_no_letters, "keep_scripts": sorted(keep_scripts),
              "kept": len(keep), "kept_pct": round(100 * len(keep) / len(tokens), 2),
              "keep_sha256": hashlib.sha256(json.dumps(keep).encode()).hexdigest()[:16]}
     Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -239,11 +277,13 @@ def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
     s = sp.add_parser("select"); s.add_argument("--src", required=True); s.add_argument("--corpus", nargs="+", required=True); s.add_argument("--out", required=True)
+    s.add_argument("--keep-no-letters", action="store_true"); s.add_argument("--keep-scripts", default="", help="comma-separated Unicode script words, e.g. BENGALI,DEVANAGARI")
     a = sp.add_parser("apply");  a.add_argument("--src", required=True); a.add_argument("--keep", required=True); a.add_argument("--dst", required=True)
     v = sp.add_parser("verify"); v.add_argument("--src", required=True); v.add_argument("--dst", required=True); v.add_argument("--texts", nargs="+", required=True); v.add_argument("--greedy", type=int, default=0)
     args = ap.parse_args()
     if args.cmd == "select":
-        select(args.src, args.corpus, args.out)
+        select(args.src, args.corpus, args.out, keep_no_letters=args.keep_no_letters,
+               keep_scripts=tuple(x for x in args.keep_scripts.split(",") if x))
     elif args.cmd == "apply":
         apply(args.src, args.keep, args.dst)
     else:
