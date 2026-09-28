@@ -29,6 +29,16 @@ MODELS = {
     "fire":   {"repo": "CohereLabs/tiny-aya-fire",
                "table7": {"min_safe": 78.1, "mean_safe": 90.0},
                "table26_safe": {}, "table26_invalid": {}},
+    # Derived models (Section 13). "trim_of" marks a model whose f16 GGUF is produced
+    # by vocabtrim (or a symlink, for a same-hardware control) rather than by
+    # prepare download/convert. Its revision file is "<base sha>+trim<keep sha>" or
+    # "<base sha>+ctrl", so run directories never collide with the base model's.
+    "fire_trim":  {"repo": "CohereLabs/tiny-aya-fire", "trim_of": "fire",
+                   "table7": {"min_safe": 78.1, "mean_safe": 90.0}, "table26_safe": {}, "table26_invalid": {}},
+    "fire_trim2": {"repo": "CohereLabs/tiny-aya-fire", "trim_of": "fire",
+                   "table7": {"min_safe": 78.1, "mean_safe": 90.0}, "table26_safe": {}, "table26_invalid": {}},
+    "fire_ctrl":  {"repo": "CohereLabs/tiny-aya-fire", "trim_of": "fire",
+                   "table7": {"min_safe": 78.1, "mean_safe": 90.0}, "table26_safe": {}, "table26_invalid": {}},
     "water":  {"repo": "CohereLabs/tiny-aya-water",
                "table7": {"min_safe": 82.9, "mean_safe": 89.7},
                "table26_safe": {}, "table26_invalid": {}},
@@ -49,14 +59,23 @@ REFERENCE  = "f16"                         # unquantized reference: same backend
 QUANTS     = ["q8_0", "q4_k_m", "q4_0"]   # the three formats the paper ships (§6)
 PRECISIONS = [REFERENCE] + QUANTS
 # ── calibrated quants (exploratory; inert unless TINYAYA_CALIB=1) ───────────
-# llama.cpp q4_0/q4_k_m are round-to-nearest with no calibration data. The one
-# calibration knob is the importance matrix (llama-imatrix + llama-quantize
-# --imatrix), which reweights rounding error by per-channel activation
-# magnitude. precision name -> (llama-quantize type, corpus relative to ROOT).
+# llama.cpp q4_0/q4_k_m are data-free block quantizers (q4_0: 32-weight blocks,
+# max-based fp16 scale, nearest-level rounding; K-quants: 256-weight super-blocks
+# with a per-sub-block scale/min search, then nearest-level rounding; tied
+# embeddings quantized as the output tensor at Q6_K). The one calibration knob is
+# the importance matrix (llama-imatrix + llama-quantize --imatrix), which weights
+# rounding error by per-channel activation magnitude. NOTE: llama-imatrix reads the
+# first --chunks x n_ctx tokens of the corpus in order; shuffle multi-language
+# corpora. precision name -> (llama-quantize type, corpus relative to ROOT).
 CALIB_QUANTS = {
-    "q4_0_im_lowres": ("Q4_0", "calib/lowres.txt"),
-    "q4_0_im_en":     ("Q4_0", "calib/en.txt"),
-    "q4_0_im_uni":    ("Q4_0", "calib/uniform10.txt"),
+    # Section 11: none of these recover structural collapse; kept for the record.
+    "q4_0_im_lowres":       ("Q4_0",   "calib/lowres.txt"),        # FLORES, block-ordered (run 1)
+    "q4_0_im_lowres_instr": ("Q4_0",   "calib/lowres_instr.txt"),  # Aya, block-ordered (superseded)
+    "q4_0_im_flores_s":     ("Q4_0",   "calib/flores_s.txt"),      # FLORES, shuffled
+    "q4_0_im_aya_s":        ("Q4_0",   "calib/aya_s.txt"),         # Aya instructions, shuffled
+    "q4_k_m_im_aya_s":      ("Q4_K_M", "calib/aya_s.txt"),         # Aya imatrix on Q4_K_M (hurts jv)
+    "q4_0_im_en":           ("Q4_0",   "calib/en.txt"),            # planned control, not run
+    "q4_0_im_uni":          ("Q4_0",   "calib/uniform10.txt"),     # planned, not run
 }
 if os.environ.get("TINYAYA_CALIB") == "1":
     PRECISIONS = PRECISIONS + list(CALIB_QUANTS)

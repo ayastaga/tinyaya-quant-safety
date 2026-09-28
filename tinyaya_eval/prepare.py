@@ -40,6 +40,9 @@ def sh(cmd, logname):
 
 
 def download():
+    if "trim_of" in config.MODELS[config.MODEL_NAME]:
+        raise SystemExit(f"{config.MODEL_NAME} is a derived model (trim_of={config.MODELS[config.MODEL_NAME]['trim_of']}): "
+                         "run vocabtrim apply (or symlink the base f16) instead of prepare download/convert")
     from huggingface_hub import snapshot_download
     rev = common.resolve_revision()
     print(f"{config.HF_REPO} @ {config.HF_REVISION} -> {rev}")
@@ -56,6 +59,9 @@ def download():
 
 
 def convert():
+    if "trim_of" in config.MODELS[config.MODEL_NAME]:
+        raise SystemExit(f"{config.MODEL_NAME} is a derived model (trim_of={config.MODELS[config.MODEL_NAME]['trim_of']}): "
+                         "run vocabtrim apply (or symlink the base f16) instead of prepare download/convert")
     GGUF_DIR.mkdir(parents=True, exist_ok=True)
     out = gguf_path("f16")
     if out.exists():
