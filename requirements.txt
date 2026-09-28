@@ -8,3 +8,8 @@ datasets
 huggingface_hub
 cohere
 protobuf>=5.29,<6
+numpy
+gguf
+transformers>=4.40
+sentencepiece
+sacrebleu
