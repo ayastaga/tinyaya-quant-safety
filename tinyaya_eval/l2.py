@@ -112,6 +112,15 @@ def gpu_name():
 
 
 # ───────────────────────────────────────────────────────────── backend ──
+DECODING = os.environ.get("TINYAYA_DECODING", "sample")          # "sample" (model card) | "greedy"
+SAMPLING = {"temp": 0.6, "top_p": 0.95, "top_k": 0, "min_p": 0.0, "repeat_penalty": 1.0}   # model card; no min_p / top_k
+
+
+def prompt_seed(item_id):
+    import hashlib
+    return int(hashlib.sha256(item_id.encode()).hexdigest()[:8], 16)
+
+
 class L2Backend:
     """Thinking-mode wrapper around generate.Backend. Returns trace and answer separately (split on the
     <|END_THINKING|> token id, not on text: detokenize() drops special tokens)."""
@@ -136,6 +145,12 @@ class L2Backend:
         assert not bad, f"think delimiters are not single tokens: {bad}"
         self.ids = {k: v[0] for k, v in self.ids.items()}
         self.end_think = self.ids["end"]
+        self.decoding = DECODING
+        self.kw = dict(self.b.kw)
+        if self.decoding == "sample":
+            self.kw.update(SAMPLING)
+        else:
+            assert self.decoding == "greedy", self.decoding
         assert self.ids["resp_end"] in self.b.stop_ids, "stop set lacks <|END_RESPONSE|>"
         assert self.end_think not in self.b.stop_ids, "stop set contains <|END_THINKING|>: answers would be cut off"
 
@@ -150,13 +165,15 @@ class L2Backend:
             r = r.rstrip() + self.prefix
         return r
 
-    def generate(self, user_text):
+    def generate(self, user_text, seed=0):
+        if self.decoding == "sample":
+            self.llm.set_seed(int(seed))
         toks = self.llm.tokenize(self.render(user_text).encode("utf-8"), add_bos=False, special=True)
         budget = max(1, min(self.cfg.MAX_NEW_TOKENS, self.llm.n_ctx() - len(toks) - 8))
         out, finish, stop = [], "length", None
         if self.cfg.KV_RESET_PER_PROMPT:
             self.llm.reset()
-        for tid in self.llm.generate(toks, **self.b.kw):
+        for tid in self.llm.generate(toks, **self.kw):
             if tid in self.b.stop_ids:
                 finish, stop = "stop", self.b.stop_ids[tid]
                 break
@@ -212,8 +229,9 @@ def lid(text, root="/content"):
     prose = re.sub(r"\\[a-zA-Z]+\{[^}]*\}|\$[^$]*\$|[\d\W_]+", " ", text).strip()
     if len(prose) < 20:
         return None
-    lab, _ = _LID.predict(prose[:3000].replace("\n", " "))
-    return lab[0].replace("__label__", "")
+    # _LID.predict() breaks under NumPy 2 (np.array(..., copy=False)); the C++ binding returns [(prob, label)] directly
+    pairs = _LID.f.predict(prose[:3000].replace("\n", " "), 1, 0.0, "strict")
+    return pairs[0][1].replace("__label__", "") if pairs else None
 
 
 def l2_flag(row):
@@ -223,10 +241,25 @@ def l2_flag(row):
 
 
 _NUM = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_ANS_MARK = re.compile(r"(?:final answer|answer|উত্তর|उत्तर|คำตอบ|antwort|réponse|respuesta|答案|答え|ответ|jibu|సమాధానం|விடை|جواب|الإجابة)", re.I)
+
+
+def _ascii_digits(s):
+    """Bengali/Devanagari/Thai/Arabic-Indic/... digits -> ASCII (models often answer in native numerals)."""
+    import unicodedata
+    return "".join(str(unicodedata.digit(c)) if c.isdigit() and not c.isascii() else c for c in s)
+
+
+def _clean(s):
+    s = _ascii_digits(s)
+    s = re.sub(r"\\(?:text|mathrm|textbf|mathbf)\{([^{}]*)\}", r" \1 ", s)
+    for a, b in (("\\$", ""), ("$", ""), ("\\,", ""), ("\\!", ""), ("\u202f", ""), ("\u00a0", ""), ("\u2009", ""), ("\\%", "%")):
+        s = s.replace(a, b)
+    return s
 
 
 def _norm_num(s):
-    s = s.replace(",", "").replace("$", "").strip()
+    s = _clean(str(s)).replace(",", "").strip()
     try:
         v = float(s)
     except ValueError:
@@ -234,13 +267,39 @@ def _norm_num(s):
     return int(v) if v == int(v) else v
 
 
+def _boxed(text):
+    r"""Contents of every \boxed{...}, brace-matched (handles \boxed{\$460} and \boxed{18\text{ dollars}})."""
+    out, k = [], 0
+    while True:
+        k = text.find("\\boxed{", k)
+        if k < 0:
+            return out
+        depth, i = 1, k + len("\\boxed{")
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0); i += 1
+        out.append(text[k + len("\\boxed{"):i - 1]); k = i
+
+
+def _first_num(s):
+    m = _NUM.findall(_clean(s))
+    return _norm_num(m[0]) if m else None
+
+
 def mgsm_pred(answer):
-    m = re.findall(r"\\boxed\{([^}]*)\}", answer)
-    cand = m[-1] if m else None
-    if cand is None:
-        nums = _NUM.findall(answer)
-        cand = nums[-1] if nums else None
-    return _norm_num(cand) if cand is not None else None
+    r"""Priority: last \boxed{} -> number after the last answer marker -> last number outside trailing
+    parenthetical asides (models append '(If instead ... 120 ...)' notes after the real answer)."""
+    for b in reversed(_boxed(answer)):
+        v = _first_num(b)
+        if v is not None:
+            return v
+    marks = list(_ANS_MARK.finditer(answer))
+    if marks:
+        v = _first_num(answer[marks[-1].end():marks[-1].end() + 120])
+        if v is not None:
+            return v
+    body = re.sub(r"\*?\([^()]{40,}\)\*?", " ", answer)
+    nums = _NUM.findall(_clean(body)) or _NUM.findall(_clean(answer))
+    return _norm_num(nums[-1]) if nums else None
 
 
 def mgsm_correct(answer, gold):
@@ -349,7 +408,8 @@ def out_path(dataset, variant, precision, tag="pilot"):
     from . import config
     d = Path(config.ROOT) / "runs_l2" / config.MODEL_NAME / tag
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{dataset}__{variant}__{precision}.jsonl"
+    suffix = "" if DECODING == "greedy" else f"__{DECODING}"          # greedy keeps the original file names
+    return d / f"{dataset}__{variant}__{precision}{suffix}.jsonl"
 
 
 def load_rows(path):
@@ -378,8 +438,9 @@ def gen(precision, dataset, langs, n, variant="L2", prefix="", tag="pilot", mirr
     t0, k = time.time(), 0
     with open(path, "a", encoding="utf-8") as f:
         for it in items:
-            g = be.generate(it["prompt"])
-            row = {"id": it["id"], "lang": it["lang"], "gold": it["gold"], "aux": it["aux"], "dataset": dataset,
+            seed = prompt_seed(it["id"])
+            g = be.generate(it["prompt"], seed=seed)
+            row = {"decoding": DECODING, "seed": seed if DECODING == "sample" else None, "id": it["id"], "lang": it["lang"], "gold": it["gold"], "aux": it["aux"], "dataset": dataset,
                    "variant": variant, "prefix": prefix, "precision": precision, "model": config.MODEL_NAME,
                    "revision": rev, "gpu": gpu, "max_new": config.MAX_NEW_TOKENS, "n_ctx": config.N_CTX, **g}
             if dataset == "mgsm":
@@ -402,11 +463,12 @@ def probe(precision):
     r = be.render("2+2 কত?")
     print(f"--- {precision} --- trigger in template: {TRIGGER in r} | ends with START_THINKING: {r.rstrip().endswith(THINK['start'])}")
     print("think ids:", be.ids, "| stop ids:", sorted(be.b.stop_ids.items()))
-    g = be.generate("2+2 কত?")
+    g = be.generate("2+2 কত?", seed=1)
+    print(f"decoding={be.decoding}")
     print(f"finish={g['finish']} stop={g['stop_token']} think_closed={g['think_closed']} n_trace={g['n_trace']} n_answer={g['n_answer']}")
     print("trace tail:", repr(g["trace"][-160:])); print("answer   :", repr(g["answer"][:200]))
     ok = g["finish"] == "stop" and g["think_closed"] and g["n_answer"] > 0
-    same = be.generate("2+2 কত?")["answer"] == g["answer"]
+    same = be.generate("2+2 কত?", seed=1)["answer"] == g["answer"]
     print("deterministic:", same, "=>", "PASS" if ok and same else "FAIL")
     be.close()
     return ok and same
